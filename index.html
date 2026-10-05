@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>よさこい隊列シミュレーター (出力版)</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-white flex flex-col h-[100dvh] overflow-hidden select-none font-sans">
+  <div class="p-3 border-b border-gray-700 flex justify-between items-center bg-gray-800 shrink-0">
+     <h1 class="font-bold text-sm">隊列ビューア</h1>
+     <label class="cursor-pointer bg-blue-600 hover:bg-blue-500 px-3 py-1.5 rounded text-xs font-bold">
+        MP3音源を選択
+        <input type="file" id="audioUpload" accept="audio/mp3" class="hidden">
+     </label>
+  </div>
+  <div class="flex-1 relative flex items-center justify-center p-2 bg-gray-800 overflow-hidden">
+    <div id="stage" class="w-full max-w-4xl aspect-[4/3] bg-gray-100 relative shadow-2xl overflow-hidden rounded-sm ring-1 ring-gray-700" style="background-image: linear-gradient(to right, #e5e7eb 1px, transparent 1px), linear-gradient(to bottom, #e5e7eb 1px, transparent 1px); background-size: 5% 5%;">
+    </div>
+  </div>
+  <div class="p-3 bg-gray-800 border-t border-gray-700 flex items-center gap-3 shrink-0">
+    <button id="playBtn" class="bg-blue-600 text-white w-10 h-10 rounded-full flex items-center justify-center font-bold">▶</button>
+    <span id="timeDisplay" class="text-xs font-mono w-10 text-center">0:00</span>
+    <input type="range" id="timeline" min="0" step="0.01" value="0" class="flex-1 accent-blue-500 h-1.5 bg-gray-700 appearance-none rounded-lg">
+  </div>
+  <audio id="audio"></audio>
+  <script>
+    const data = {"scenes":[{"id":"scene_0","name":"シーン 1","time":0}],"entities":[],"duration":60};
+    const getInterpolatedPosition = (entity, scenes, time) => {
+    if (!entity.positions)
+      return { x: 50, y: 50 };
+    const sortedScenes = [...scenes].sort((a, b) => a.time - b.time);
+    if (sortedScenes.length === 0)
+      return { x: 50, y: 50 };
+    let targetSceneIndex = 0;
+    for (let i = 0; i < sortedScenes.length; i++) {
+      if (time <= sortedScenes[i].time) {
+        targetSceneIndex = i;
+        break;
+      }
+      targetSceneIndex = i;
+    }
+    const targetScene = sortedScenes[targetSceneIndex];
+    const prevScene = targetSceneIndex > 0 ? sortedScenes[targetSceneIndex - 1] : targetScene;
+    const targetData = entity.positions[targetScene.id] || { x: 50, y: 50, duration: 2, pathType: "linear" };
+    const prevData = entity.positions[prevScene.id] || { x: 50, y: 50 };
+    if (targetScene.id === prevScene.id)
+      return { x: targetData.x, y: targetData.y };
+    const moveDuration = targetData.duration !== void 0 ? targetData.duration : 2;
+    const moveStartTime = targetScene.time - moveDuration;
+    if (time <= moveStartTime)
+      return { x: prevData.x, y: prevData.y };
+    if (time >= targetScene.time)
+      return { x: targetData.x, y: targetData.y };
+    const progress = (time - moveStartTime) / moveDuration;
+    const p0 = prevData;
+    const p1 = targetData;
+    if (p1.pathType === "curve" && p1.cpX != null) {
+      const x = Math.pow(1 - progress, 2) * p0.x + 2 * (1 - progress) * progress * p1.cpX + Math.pow(progress, 2) * p1.x;
+      const y = Math.pow(1 - progress, 2) * p0.y + 2 * (1 - progress) * progress * p1.cpY + Math.pow(progress, 2) * p1.y;
+      return { x, y };
+    } else if (p1.pathType === "rightAngleX") {
+      if (progress < 0.5)
+        return { x: p0.x + (p1.x - p0.x) * (progress * 2), y: p0.y };
+      else
+        return { x: p1.x, y: p0.y + (p1.y - p0.y) * ((progress - 0.5) * 2) };
+    } else if (p1.pathType === "rightAngleY") {
+      if (progress < 0.5)
+        return { x: p0.x, y: p0.y + (p1.y - p0.y) * (progress * 2) };
+      else
+        return { x: p0.x + (p1.x - p0.x) * ((progress - 0.5) * 2), y: p1.y };
+    } else {
+      const x = p0.x + (p1.x - p0.x) * progress;
+      const y = p0.y + (p1.y - p0.y) * progress;
+      return { x, y };
+    }
+  };
+    
+    const stage = document.getElementById('stage');
+    const playBtn = document.getElementById('playBtn');
+    const timeline = document.getElementById('timeline');
+    const timeDisplay = document.getElementById('timeDisplay');
+    const audio = document.getElementById('audio');
+    const audioUpload = document.getElementById('audioUpload');
+    
+    let isPlaying = false;
+    let duration = data.duration || 60;
+    timeline.max = duration;
+
+    const render = () => {
+       const time = parseFloat(timeline.value);
+       const m = Math.floor(time/60);
+       const s = Math.floor(time%60);
+       timeDisplay.textContent = m + ':' + s.toString().padStart(2,'0');
+       
+       stage.innerHTML = '';
+       data.entities.forEach(ent => {
+          const pos = getInterpolatedPosition(ent, data.scenes, time);
+          const el = document.createElement('div');
+          el.className = 'absolute transform -translate-x-1/2 -translate-y-1/2 flex items-center justify-center font-bold text-[9px] md:text-[10px] text-white leading-none text-center overflow-hidden shadow-sm ' + ent.color;
+          if(ent.type === 'prop') {
+             if(ent.size) { el.style.width = ent.size.w + '%'; el.style.height = ent.size.h + '%'; el.classList.add('rounded-sm'); }
+             else { el.className += ' w-10 h-10 md:w-12 md:h-12 rounded-sm'; }
+          } else {
+             el.className += ' w-6 h-6 md:w-8 md:h-8 rounded-full';
+          }
+          el.style.left = pos.x + '%';
+          el.style.top = pos.y + '%';
+          el.textContent = ent.name.substring(0,3);
+          stage.appendChild(el);
+       });
+    };
+
+    audioUpload.addEventListener('change', e => {
+       if(e.target.files[0]) {
+           audio.src = URL.createObjectURL(e.target.files[0]);
+           audio.onloadedmetadata = () => { duration = audio.duration; timeline.max = duration; };
+       }
+    });
+
+    playBtn.addEventListener('click', () => {
+       if(!audio.src && data.entities.length===0) return;
+       isPlaying = !isPlaying;
+       playBtn.textContent = isPlaying ? '⏸' : '▶';
+       if(isPlaying) { if(audio.src) audio.play(); requestAnimationFrame(loop); }
+       else { audio.pause(); }
+    });
+
+    timeline.addEventListener('input', () => {
+       if(audio.src) audio.currentTime = timeline.value;
+       render();
+    });
+
+    const loop = () => {
+       if(!isPlaying) return;
+       if(audio.src) timeline.value = audio.currentTime;
+       else timeline.value = Math.min(duration, parseFloat(timeline.value) + 0.016);
+       if(parseFloat(timeline.value) >= duration) { isPlaying = false; playBtn.textContent = '▶'; }
+       render();
+       if(isPlaying) requestAnimationFrame(loop);
+    };
+
+    render(); // Initial render
+  </script>
+</body>
+</html>
