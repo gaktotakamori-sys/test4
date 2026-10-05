@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>よさこい隊列ビューア</title>
+<style>
+  body, html { margin: 0; padding: 0; width: 100%; height: 100%; background: #18181b; color: white; font-family: sans-serif; overflow: hidden; touch-action: none; overscroll-behavior: none; }
+  #app { display: flex; flex-direction: column; height: 100%; }
+  #stage-container { flex: 1; position: relative; display: flex; justify-content: center; align-items: center; padding: 16px; box-sizing: border-box; }
+  #stage { width: 100%; height: 100%; position: relative; background: #27272a; border-radius: 8px; border: 1px solid #3f3f46; overflow: hidden; }
+  .element { position: absolute; transform: translate(-50%, -50%); display: flex; justify-content: center; align-items: center; font-size: 12px; font-weight: bold; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.8); user-select: none; border: 1px solid rgba(255,255,255,0.3); }
+  .dancer { border-radius: 50%; width: 28px; height: 28px; }
+  .prop { border-radius: 4px; }
+  #bottom-bar { background: #09090b; border-top: 1px solid #27272a; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; }
+  #controls { display: flex; align-items: center; gap: 16px; }
+  button { background: #3b82f6; color: white; border: none; padding: 8px 16px; border-radius: 6px; font-weight: bold; cursor: pointer; }
+  button:active { background: #2563eb; }
+  #timeline { flex: 1; height: 32px; background: #27272a; border-radius: 6px; position: relative; cursor: pointer; overflow: hidden; }
+  #progress { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(59, 130, 246, 0.3); pointer-events: none; border-right: 2px solid #3b82f6; }
+  .scene-marker { position: absolute; top: 0; bottom: 0; width: 2px; background: #52525b; pointer-events: none; }
+  .scene-marker.active { background: #eab308; z-index: 10; }
+  #time-display { font-variant-numeric: tabular-nums; font-size: 14px; min-width: 60px; text-align: right;}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage-container"><div id="stage"></div></div>
+  <div id="bottom-bar">
+    <div id="timeline">
+      <div id="progress"></div>
+    </div>
+    <div id="controls">
+      <button id="playBtn">Play / Pause</button>
+      <button id="resetBtn">Reset</button>
+      <div id="time-display">0:00.0</div>
+    </div>
+  </div>
+</div>
+<script>
+  const data = {"elements":[],"scenes":[{"id":"s1","time":0,"positions":{}},{"id":"tnmh7rp82","time":5,"positions":{}},{"id":"2am399o1y","time":10,"positions":{}},{"id":"96g9y5od5","time":15,"positions":{}},{"id":"ook4lc4rj","time":20,"positions":{}},{"id":"ch9cqe5i6","time":25,"positions":{}},{"id":"f9vwdmgp3","time":30,"positions":{}},{"id":"swy7e5u6q","time":35,"positions":{}}],"audioData":null,"audioName":null};
+  (p0, p1, t, pathType) => {
+    if (pathType === "curve") {
+      const midX = (p0.x + p1.x) / 2;
+      const midY = (p0.y + p1.y) / 2;
+      const dx = p1.x - p0.x;
+      const dy = p1.y - p0.y;
+      const nx = -dy;
+      const ny = dx;
+      const offset = 0.2;
+      const cx = midX + nx * offset;
+      const cy = midY + ny * offset;
+      const x = (1 - t) * (1 - t) * p0.x + 2 * (1 - t) * t * cx + t * t * p1.x;
+      const y = (1 - t) * (1 - t) * p0.y + 2 * (1 - t) * t * cy + t * t * p1.y;
+      return { x, y };
+    } else if (pathType === "rect-hv") {
+      if (t < 0.5)
+        return { x: p0.x + (p1.x - p0.x) * (t * 2), y: p0.y };
+      else
+        return { x: p1.x, y: p0.y + (p1.y - p0.y) * ((t - 0.5) * 2) };
+    } else if (pathType === "rect-vh") {
+      if (t < 0.5)
+        return { x: p0.x, y: p0.y + (p1.y - p0.y) * (t * 2) };
+      else
+        return { x: p0.x + (p1.x - p0.x) * ((t - 0.5) * 2), y: p1.y };
+    }
+    return { x: p0.x + (p1.x - p0.x) * t, y: p0.y + (p1.y - p0.y) * t };
+  }
+  
+  const stage = document.getElementById('stage');
+  const playBtn = document.getElementById('playBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const timeline = document.getElementById('timeline');
+  const progress = document.getElementById('progress');
+  const timeDisp = document.getElementById('time-display');
+  
+  let audio = null;
+  if (data.audioData) {
+    audio = new Audio(data.audioData);
+  }
+  
+  let isPlaying = false;
+  let currentTime = 0;
+  let duration = data.audioData ? 0 : (data.scenes.length > 0 ? data.scenes[data.scenes.length - 1].time + 10 : 60);
+  let reqId = null;
+  
+  if (audio) {
+    audio.addEventListener('loadedmetadata', () => { duration = audio.duration; renderMarkers(); });
+    audio.addEventListener('ended', () => { isPlaying = false; cancelAnimationFrame(reqId); });
+  }
+
+  // Initialize Elements
+  const elNodes = {};
+  data.elements.forEach(el => {
+    const div = document.createElement('div');
+    div.className = 'element ' + (el.type === 'dancer' ? 'dancer' : 'prop');
+    div.style.backgroundColor = el.color;
+    div.innerText = el.name;
+    if (el.type === 'prop') {
+      div.style.width = el.width + 'px';
+      div.style.height = el.height + 'px';
+    }
+    stage.appendChild(div);
+    elNodes[el.id] = div;
+  });
+
+  const renderMarkers = () => {
+    document.querySelectorAll('.scene-marker').forEach(n => n.remove());
+    data.scenes.forEach((sc, i) => {
+      const p = (sc.time / duration) * 100;
+      const m = document.createElement('div');
+      m.className = 'scene-marker';
+      m.id = 'marker-' + sc.id;
+      m.style.left = p + '%';
+      timeline.appendChild(m);
+    });
+  };
+  renderMarkers();
+
+  const updatePositions = (time) => {
+    const sortedScenes = [...data.scenes].sort((a, b) => a.time - b.time);
+    data.elements.forEach(el => {
+      let prevScene = null, nextScene = null;
+      for (let i = 0; i < sortedScenes.length; i++) {
+        if (sortedScenes[i].time <= time) prevScene = sortedScenes[i];
+        if (sortedScenes[i].time > time && !nextScene) nextScene = sortedScenes[i];
+      }
+      
+      let x = 50, y = 50;
+      if (!prevScene && nextScene && nextScene.positions[el.id]) {
+        x = nextScene.positions[el.id].x; y = nextScene.positions[el.id].y;
+      } else if (prevScene && !nextScene && prevScene.positions[el.id]) {
+        x = prevScene.positions[el.id].x; y = prevScene.positions[el.id].y;
+      } else if (prevScene && nextScene) {
+        const p0 = prevScene.positions[el.id];
+        const p1 = nextScene.positions[el.id];
+        if (p0 && p1) {
+          const moveDuration = p1.moveDuration ?? (nextScene.time - prevScene.time);
+          const moveStartTime = nextScene.time - moveDuration;
+          if (time < moveStartTime) {
+            x = p0.x; y = p0.y;
+          } else if (time >= nextScene.time) {
+            x = p1.x; y = p1.y;
+          } else {
+            const t = (time - moveStartTime) / moveDuration;
+            const pos = interpolate(p0, p1, t, p1.pathType);
+            x = pos.x; y = pos.y;
+          }
+        } else if (p0) { x = p0.x; y = p0.y; }
+      }
+      elNodes[el.id].style.left = x + '%';
+      elNodes[el.id].style.top = y + '%';
+    });
+
+    // Update active marker
+    let activeSc = null;
+    sortedScenes.forEach(sc => { if (time >= sc.time) activeSc = sc; });
+    document.querySelectorAll('.scene-marker').forEach(n => n.classList.remove('active'));
+    if (activeSc) {
+      const m = document.getElementById('marker-' + activeSc.id);
+      if (m) m.classList.add('active');
+    }
+  };
+
+  const loop = () => {
+    if (isPlaying) {
+      currentTime = audio ? audio.currentTime : currentTime + 1/60;
+      if (!audio && currentTime > duration) { isPlaying = false; currentTime = duration; }
+    }
+    progress.style.width = (currentTime / duration * 100) + '%';
+    
+    const m = Math.floor(currentTime / 60);
+    const s = Math.floor(currentTime % 60).toString().padStart(2, '0');
+    const ms = Math.floor((currentTime % 1) * 10);
+    timeDisp.innerText = `${m}:${s}.${ms}`;
+    
+    updatePositions(currentTime);
+    if (isPlaying) reqId = requestAnimationFrame(loop);
+  };
+
+  playBtn.onclick = () => {
+    isPlaying = !isPlaying;
+    if (isPlaying) {
+      if (audio) audio.play();
+      reqId = requestAnimationFrame(loop);
+    } else {
+      if (audio) audio.pause();
+      cancelAnimationFrame(reqId);
+    }
+  };
+  
+  resetBtn.onclick = () => {
+    currentTime = 0;
+    if (audio) audio.currentTime = 0;
+    if (!isPlaying) updatePositions(currentTime);
+    progress.style.width = '0%';
+    timeDisp.innerText = '0:00.0';
+  };
+
+  timeline.onclick = (e) => {
+    const rect = timeline.getBoundingClientRect();
+    const p = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    currentTime = p * duration;
+    if (audio) audio.currentTime = currentTime;
+    if (!isPlaying) {
+      progress.style.width = (p * 100) + '%';
+      updatePositions(currentTime);
+    }
+  };
+
+  // init render
+  updatePositions(0);
+</script>
+</body>
+</html>
