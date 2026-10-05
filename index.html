@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>よさこい隊列シミュレーター</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- FontAwesome (Icons) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <!-- React & ReactDOM -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  
+  <!-- Babel (JSXコンパイラ) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    /* スクロールバーを隠すユーティリティクラス */
+    .scrollbar-hide::-webkit-scrollbar { display: none; }
+    .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+  </style>
+</head>
+<body class="bg-gray-900">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+    const COLORS = [
+      '#ef4444', '#f97316', '#f59e0b', '#84cc16', '#22c55e', 
+      '#06b6d4', '#3b82f6', '#6366f1', '#a855f7', '#ec4899',
+      '#ffffff', '#9ca3af', '#374151', '#000000'
+    ];
+
+    const DEFAULT_PROJECT = {
+      elements: [],
+      scenes: [
+        { id: 'scene-initial', name: 'S1', time: 0, positions: {} }
+      ],
+      audioBase64: null,
+    };
+
+    // パスタイプに基づいた補間計算
+    const calculateInterpolation = (pos0, pos1, pathType, p) => {
+      if (!pos0) return pos1 || { x: 50, y: 50 };
+      if (!pos1) return pos0;
+      
+      if (pathType === 'right-h-v') {
+        if (p < 0.5) return { x: pos0.x + (pos1.x - pos0.x) * (p * 2), y: pos0.y };
+        else return { x: pos1.x, y: pos0.y + (pos1.y - pos0.y) * ((p - 0.5) * 2) };
+      } else if (pathType === 'right-v-h') {
+        if (p < 0.5) return { x: pos0.x, y: pos0.y + (pos1.y - pos0.y) * (p * 2) };
+        else return { x: pos0.x + (pos1.x - pos0.x) * ((p - 0.5) * 2), y: pos1.y };
+      } else if (pathType === 'curve') {
+        const cx = pos0.x + (pos1.x - pos0.x) / 2;
+        const cy = pos0.y; // 簡易的なベジェ制御点
+        const inv = 1 - p;
+        return {
+          x: inv * inv * pos0.x + 2 * inv * p * cx + p * p * pos1.x,
+          y: inv * inv * pos0.y + 2 * inv * p * cy + p * p * pos1.y
+        };
+      }
+      // line (default)
+      return {
+        x: pos0.x + (pos1.x - pos0.x) * p,
+        y: pos0.y + (pos1.y - pos0.y) * p
+      };
+    };
+
+    const getInterpolatedPositions = (project, time) => {
+      const { scenes, elements } = project;
+      if (scenes.length === 0) return {};
+      if (scenes.length === 1 || time <= scenes[0].time) return scenes[0].positions;
+      
+      const lastScene = scenes[scenes.length - 1];
+      if (time >= lastScene.time) return lastScene.positions;
+
+      let s0 = scenes[0], s1 = scenes[1];
+      for (let i = 0; i < scenes.length - 1; i++) {
+        if (time >= scenes[i].time && time < scenes[i + 1].time) {
+          s0 = scenes[i];
+          s1 = scenes[i + 1];
+          break;
+        }
+      }
+
+      const p = (time - s0.time) / (s1.time - s0.time);
+      const result = {};
+
+      elements.forEach(el => {
+        const id = el.id;
+        const pos0 = s0.positions[id];
+        const pos1 = s1.positions[id];
+        
+        if (!pos0 && !pos1) return;
+        const targetPos = pos1 || pos0;
+        const pathType = targetPos.pathType || 'line';
+        
+        const { x, y } = calculateInterpolation(pos0, pos1, pathType, p);
+        result[id] = { ...targetPos, x, y };
+      });
+
+      return result;
+    };
+
+    const generateViewerHTML = (project) => {
+      const projectJson = JSON.stringify(project);
+      return `<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Yosakoi Simulator - Viewer</title>
+<style>
+  body { margin: 0; padding: 0; background: #111827; color: white; font-family: sans-serif; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+  #header { padding: 12px; background: #1f2937; display: flex; align-items: center; gap: 16px; border-bottom: 1px solid #374151; }
+  button { background: #3b82f6; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; }
+  button:hover { background: #2563eb; }
+  input[type=range] { flex-grow: 1; cursor: pointer; }
+  #stage-wrap { flex-grow: 1; display: flex; align-items: center; justify-content: center; padding: 16px; }
+  #stage { background: #e5e7eb; width: 100%; max-width: 1200px; aspect-ratio: 16/9; position: relative; border-radius: 8px; overflow: hidden; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+  .el { position: absolute; transform: translate(-50%, -50%); display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 1.2vmin; color: white; user-select: none; text-shadow: 0 1px 2px rgba(0,0,0,0.8); border: 2px solid rgba(255,255,255,0.3); box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+  .el.dancer { border-radius: 50%; width: 2.5%; aspect-ratio: 1; }
+</style>
+</head>
+<body>
+  <div id="header">
+    <button id="playBtn">Play / Pause</button>
+    <input type="range" id="seek" min="0" max="100" value="0" step="0.05">
+    <span id="timeDisplay" style="min-width: 60px; font-variant-numeric: tabular-nums;">0.0s</span>
+  </div>
+  <div id="stage-wrap"><div id="stage"></div></div>
+
+  <script>
+    const project = ${projectJson};
+    let audio = null;
+    let isPlaying = false;
+    let animFrame = null;
+    let currentTime = 0;
+    const stage = document.getElementById('stage');
+    const playBtn = document.getElementById('playBtn');
+    const seek = document.getElementById('seek');
+    const timeDisplay = document.getElementById('timeDisplay');
+    let maxTime = project.scenes.length > 0 ? project.scenes[project.scenes.length-1].time : 0;
+
+    const els = {};
+    project.elements.forEach(elData => {
+      const el = document.createElement('div');
+      el.className = 'el ' + elData.type;
+      el.style.backgroundColor = elData.color;
+      if (elData.type === 'prop') {
+        el.style.width = elData.width + '%';
+        el.style.height = elData.height + '%';
+        el.style.borderRadius = '4px';
+      }
+      el.innerText = elData.name || '';
+      stage.appendChild(el);
+      els[elData.id] = el;
+    });
+
+    if (project.audioBase64) {
+      audio = new Audio(project.audioBase64);
+      audio.addEventListener('loadedmetadata', () => {
+        maxTime = Math.max(maxTime, audio.duration);
+        seek.max = maxTime;
+      });
+      audio.addEventListener('ended', () => { isPlaying = false; });
+    } else {
+      seek.max = maxTime > 0 ? maxTime : 10;
+    }
+
+    playBtn.addEventListener('click', () => {
+      isPlaying = !isPlaying;
+      if (audio) {
+        if (isPlaying) audio.play();
+        else audio.pause();
+      }
+    });
+
+    seek.addEventListener('input', (e) => {
+      currentTime = parseFloat(e.target.value);
+      if (audio) audio.currentTime = currentTime;
+      render();
+    });
+
+    ${calculateInterpolation.toString()}
+    ${getInterpolatedPositions.toString()}
+
+    let lastTimestamp = 0;
+    function loop(timestamp) {
+      if (isPlaying) {
+        if (audio) {
+          currentTime = audio.currentTime;
+        } else {
+          const delta = (timestamp - lastTimestamp) / 1000;
+          currentTime += delta;
+          if (currentTime > seek.max) { currentTime = seek.max; isPlaying = false; }
+        }
+        seek.value = currentTime;
+        render();
+      }
+      lastTimestamp = timestamp;
+      animFrame = requestAnimationFrame(loop);
+    }
+
+    function render() {
+      timeDisplay.innerText = currentTime.toFixed(1) + 's';
+      const positions = getInterpolatedPositions(project, currentTime);
+      for (const [id, pos] of Object.entries(positions)) {
+        if (els[id]) {
+          els[id].style.left = pos.x + '%';
+          els[id].style.top = pos.y + '%';
+        }
+      }
+    }
+    
+    render();
+    animFrame = requestAnimationFrame(loop);
+  <\/script>
+</body>
+</html>`;
+    };
+
+    function App() {
+      const [project, setProject] = useState(DEFAULT_PROJECT);
+      const [history, setHistory] = useState([DEFAULT_PROJECT]);
+      const [historyIndex, setHistoryIndex] = useState(0);
+      
+      const [currentTime, setCurrentTime] = useState(0);
+      const [isPlaying, setIsPlaying] = useState(false);
+      const [duration, setDuration] = useState(0);
+      
+      const [selectedIds, setSelectedIds] = useState([]);
+      const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
+      
+      const audioRef = useRef(null);
+      const animationRef = useRef(null);
+      const stageRef = useRef(null);
+      const dragState = useRef({ isDragging: false });
+
+      const [showPropModal, setShowPropModal] = useState(false);
+      const [newPropSize, setNewPropSize] = useState({ w: 10, h: 5 });
+
+      const onAudioLoaded = (e) => {
+        setDuration(e.target.duration);
+      };
+
+      const maxTimelineTime = useMemo(() => {
+        const lastSceneTime = project.scenes.length > 0 ? project.scenes[project.scenes.length - 1].time : 0;
+        return Math.max(duration, lastSceneTime, 10);
+      }, [duration, project.scenes]);
+
+      const loop = useCallback(() => {
+        if (isPlaying) {
+          if (audioRef.current && project.audioBase64) {
+            setCurrentTime(audioRef.current.currentTime);
+          } else {
+            setCurrentTime((prev) => {
+              const next = prev + 1 / 60;
+              if (next >= maxTimelineTime) {
+                setIsPlaying(false);
+                return maxTimelineTime;
+              }
+              return next;
+            });
+          }
+          animationRef.current = requestAnimationFrame(loop);
+        }
+      }, [isPlaying, project.audioBase64, maxTimelineTime]);
+
+      useEffect(() => {
+        if (isPlaying) {
+          if (audioRef.current && project.audioBase64) audioRef.current.play().catch(e => console.log(e));
+          animationRef.current = requestAnimationFrame(loop);
+        } else {
+          if (audioRef.current) audioRef.current.pause();
+          cancelAnimationFrame(animationRef.current);
+        }
+        return () => cancelAnimationFrame(animationRef.current);
+      }, [isPlaying, loop, project.audioBase64]);
+
+      const pushHistory = (newProject) => {
+        const newHist = history.slice(0, historyIndex + 1);
+        newHist.push(newProject);
+        setHistory(newHist);
+        setHistoryIndex(newHist.length - 1);
+        setProject(newProject);
+      };
+
+      const undo = () => {
+        if (historyIndex > 0) {
+          setHistoryIndex(historyIndex - 1);
+          setProject(history[historyIndex - 1]);
+        }
+      };
+
+      const redo = () => {
+        if (historyIndex < history.length - 1) {
+          setHistoryIndex(historyIndex + 1);
+          setProject(history[historyIndex + 1]);
+        }
+      };
+
+      const currentSceneIndex = useMemo(() => {
+        for (let i = project.scenes.length - 1; i >= 0; i--) {
+          if (currentTime >= project.scenes[i].time) return i;
+        }
+        return 0;
+      }, [currentTime, project.scenes]);
+
+      const activeScene = project.scenes[currentSceneIndex];
+
+      const updatePositions = (updates, isFinal = false) => {
+        const newProject = { ...project, scenes: [...project.scenes] };
+        const currIdx = currentSceneIndex;
+        
+        const currentSceneCopy = { ...newProject.scenes[currIdx] };
+        const oldPositions = { ...currentSceneCopy.positions };
+        currentSceneCopy.positions = { ...oldPositions };
+        
+        for (const [id, pos] of Object.entries(updates)) {
+          currentSceneCopy.positions[id] = { ...currentSceneCopy.positions[id], ...pos };
+        }
+        newProject.scenes[currIdx] = currentSceneCopy;
+
+        if (isFinal) {
+          for (let i = currIdx + 1; i < newProject.scenes.length; i++) {
+            const nextScene = { ...newProject.scenes[i] };
+            let changed = false;
+            const nextPositions = { ...nextScene.positions };
+
+            for (const [id, pos] of Object.entries(updates)) {
+              const oldPos = oldPositions[id];
+              const nPos = nextPositions[id];
+              if (oldPos && nPos && Math.abs(nPos.x - oldPos.x) < 0.1 && Math.abs(nPos.y - oldPos.y) < 0.1) {
+                const dx = pos.x - oldPos.x;
+                const dy = pos.y - oldPos.y;
+                nextPositions[id] = { ...nPos, x: nPos.x + dx, y: nPos.y + dy };
+                changed = true;
+              }
+            }
+            if (changed) {
+              nextScene.positions = nextPositions;
+              newProject.scenes[i] = nextScene;
+            }
+          }
+          pushHistory(newProject);
+        } else {
+          setProject(newProject);
+        }
+      };
+
+      const handleStagePointerDown = (e) => {
+        if (e.target.id === 'stage-bg') {
+          if (!isMultiSelectMode) setSelectedIds([]);
+        }
+      };
+
+      const handleElementPointerDown = (e, id) => {
+        e.stopPropagation();
+        
+        let newSelected = [...selectedIds];
+        if (isMultiSelectMode) {
+          if (!newSelected.includes(id)) newSelected.push(id);
+        } else {
+          if (!newSelected.includes(id)) newSelected = [id];
+        }
+        setSelectedIds(newSelected);
+
+        const rect = stageRef.current.getBoundingClientRect();
+        const xPct = ((e.clientX - rect.left) / rect.width) * 100;
+        const yPct = ((e.clientY - rect.top) / rect.height) * 100;
+
+        const startPositions = {};
+        newSelected.forEach(sId => {
+          startPositions[sId] = activeScene.positions[sId] || { x: 50, y: 50 };
+        });
+
+        dragState.current = {
+          isDragging: false,
+          startX: xPct,
+          startY: yPct,
+          selectedIds: newSelected,
+          startPositions
+        };
+
+        window.addEventListener('pointermove', handlePointerMove);
+        window.addEventListener('pointerup', handlePointerUp);
+      };
+
+      const handlePointerMove = (e) => {
+        if (!dragState.current) return;
+        const { startX, startY, selectedIds, startPositions } = dragState.current;
+        
+        const rect = stageRef.current.getBoundingClientRect();
+        const xPct = ((e.clientX - rect.left) / rect.width) * 100;
+        const yPct = ((e.clientY - rect.top) / rect.height) * 100;
+        
+        const dx = xPct - startX;
+        const dy = yPct - startY;
+
+        if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+          dragState.current.isDragging = true;
+        }
+
+        if (dragState.current.isDragging) {
+          const updates = {};
+          selectedIds.forEach(id => {
+            updates[id] = {
+              x: Math.max(0, Math.min(100, startPositions[id].x + dx)),
+              y: Math.max(0, Math.min(100, startPositions[id].y + dy))
+            };
+          });
+          updatePositions(updates, false);
+        }
+      };
+
+      const handlePointerUp = (e) => {
+        window.removeEventListener('pointermove', handlePointerMove);
+        window.removeEventListener('pointerup', handlePointerUp);
+
+        if (dragState.current) {
+          if (!dragState.current.isDragging) {
+            const clickedId = dragState.current.selectedIds[dragState.current.selectedIds.length - 1];
+            if (isMultiSelectMode) {
+               if (selectedIds.includes(clickedId)) {
+                 setSelectedIds(prev => prev.filter(id => id !== clickedId));
+               }
+            } else {
+               if (selectedIds.length === 1 && selectedIds[0] === clickedId) {
+                 setSelectedIds([]);
+               }
+            }
+          } else {
+            const { startX, startY, selectedIds, startPositions } = dragState.current;
+            const rect = stageRef.current.getBoundingClientRect();
+            const xPct = ((e.clientX - rect.left) / rect.width) * 100;
+            const yPct = ((e.clientY - rect.top) / rect.height) * 100;
+            const dx = xPct - startX;
+            const dy = yPct - startY;
+            
+            const updates = {};
+            selectedIds.forEach(id => {
+              updates[id] = {
+                x: Math.max(0, Math.min(100, startPositions[id].x + dx)),
+                y: Math.max(0, Math.min(100, startPositions[id].y + dy))
+              };
+            });
+            updatePositions(updates, true); 
+          }
+        }
+        dragState.current = null;
+      };
+
+      const addElement = (type, width = null, height = null) => {
+        const id = 'el-' + Date.now();
+        const newEl = { 
+          id, type, name: type === 'dancer' ? '踊' : '道具', 
+          color: type === 'dancer' ? COLORS[0] : COLORS[1],
+          width, height 
+        };
+        const newProject = { ...project, elements: [...project.elements, newEl], scenes: [...project.scenes] };
+        
+        const currScene = { ...newProject.scenes[currentSceneIndex] };
+        currScene.positions = { ...currScene.positions, [id]: { x: 50, y: 50, pathType: 'line' } };
+        newProject.scenes[currentSceneIndex] = currScene;
+        
+        pushHistory(newProject);
+        setSelectedIds([id]);
+      };
+
+      const deleteSelected = () => {
+        if (selectedIds.length === 0) return;
+        const newProject = { ...project };
+        newProject.elements = newProject.elements.filter(el => !selectedIds.includes(el.id));
+        
+        newProject.scenes = newProject.scenes.map(sc => {
+          const newPos = { ...sc.positions };
+          selectedIds.forEach(id => delete newPos[id]);
+          return { ...sc, positions: newPos };
+        });
+        
+        pushHistory(newProject);
+        setSelectedIds([]);
+      };
+
+      const updateSelectedProperties = (key, value) => {
+        const newProject = { ...project };
+        newProject.elements = newProject.elements.map(el => {
+          if (selectedIds.includes(el.id)) {
+            return { ...el, [key]: value };
+          }
+          return el;
+        });
+        pushHistory(newProject);
+      };
+
+      const updateSelectedPaths = (pathType) => {
+        const updates = {};
+        selectedIds.forEach(id => updates[id] = { pathType });
+        updatePositions(updates, true);
+      };
+
+      const nudge = (dx, dy) => {
+        const updates = {};
+        selectedIds.forEach(id => {
+          const pos = activeScene.positions[id];
+          if (pos) updates[id] = { x: Math.max(0, Math.min(100, pos.x + dx)), y: Math.max(0, Math.min(100, pos.y + dy)) };
+        });
+        updatePositions(updates, true);
+      };
+
+      const alignElements = (type) => {
+        if (selectedIds.length < 2) return;
+        const positions = selectedIds.map(id => activeScene.positions[id]).filter(Boolean);
+        if (positions.length < 2) return;
+
+        const minX = Math.min(...positions.map(p => p.x));
+        const maxX = Math.max(...positions.map(p => p.x));
+        const minY = Math.min(...positions.map(p => p.y));
+        const maxY = Math.max(...positions.map(p => p.y));
+        const updates = {};
+
+        if (type === 'left') selectedIds.forEach(id => updates[id] = { x: minX });
+        if (type === 'right') selectedIds.forEach(id => updates[id] = { x: maxX });
+        if (type === 'center-h') selectedIds.forEach(id => updates[id] = { x: (minX + maxX) / 2 });
+        if (type === 'top') selectedIds.forEach(id => updates[id] = { y: minY });
+        if (type === 'bottom') selectedIds.forEach(id => updates[id] = { y: maxY });
+        if (type === 'center-v') selectedIds.forEach(id => updates[id] = { y: (minY + maxY) / 2 });
+        
+        if (type === 'space-h') {
+          const sorted = [...selectedIds].sort((a, b) => (activeScene.positions[a]?.x || 0) - (activeScene.positions[b]?.x || 0));
+          const step = (maxX - minX) / (sorted.length - 1);
+          sorted.forEach((id, i) => updates[id] = { x: minX + step * i });
+        }
+        if (type === 'space-v') {
+          const sorted = [...selectedIds].sort((a, b) => (activeScene.positions[a]?.y || 0) - (activeScene.positions[b]?.y || 0));
+          const step = (maxY - minY) / (sorted.length - 1);
+          sorted.forEach((id, i) => updates[id] = { y: minY + step * i });
+        }
+
+        updatePositions(updates, true);
+      };
+
+      const addScene = () => {
+        const newProject = { ...project };
+        const currPositions = getInterpolatedPositions(project, currentTime);
+        
+        const newScene = {
+          id: 'scene-' + Date.now(),
+          name: `S${project.scenes.length + 1}`,
+          time: currentTime,
+          positions: currPositions
+        };
+        
+        newProject.scenes = [...newProject.scenes, newScene].sort((a, b) => a.time - b.time);
+        pushHistory(newProject);
+      };
+
+      const deleteScene = (index) => {
+        if (project.scenes.length <= 1) return;
+        const newProject = { ...project };
+        newProject.scenes = newProject.scenes.filter((_, i) => i !== index);
+        pushHistory(newProject);
+      };
+
+      const updateSceneTime = (index, newTime) => {
+        const newProject = { ...project };
+        newProject.scenes[index].time = Number(newTime);
+        newProject.scenes.sort((a, b) => a.time - b.time);
+        pushHistory(newProject);
+      };
+
+      const handleAudioUpload = (e) => {
+        const file = e.target.files[0];
+        if (file) {
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            pushHistory({ ...project, audioBase64: ev.target.result });
+          };
+          reader.readAsDataURL(file);
+        }
+      };
+
+      const exportJSON = () => {
+        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(project));
+        const dlAnchorElem = document.createElement('a');
+        dlAnchorElem.setAttribute("href", dataStr);
+        dlAnchorElem.setAttribute("download", "yosakoi_project.json");
+        dlAnchorElem.click();
+      };
+
+      const importJSON = (e) => {
+        const file = e.target.files[0];
+        if (file) {
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            try {
+              const parsed = JSON.parse(ev.target.result);
+              pushHistory(parsed);
+            } catch (err) {
+              alert("不正なファイルです。");
+            }
+          };
+          reader.readAsText(file);
+        }
+      };
+
+      const exportHTML = () => {
+        const htmlStr = generateViewerHTML(project);
+        const dataStr = "data:text/html;charset=utf-8," + encodeURIComponent(htmlStr);
+        const dlAnchorElem = document.createElement('a');
+        dlAnchorElem.setAttribute("href", dataStr);
+        dlAnchorElem.setAttribute("download", "yosakoi_viewer.html");
+        dlAnchorElem.click();
+      };
+
+      const interpolatedPositions = getInterpolatedPositions(project, currentTime);
+
+      return (
+        <div className="flex flex-col h-screen bg-gray-900 text-gray-100 font-sans overflow-hidden">
+          {/* Header */}
+          <header className="bg-gray-800 border-b border-gray-700 p-3 flex flex-wrap items-center justify-between gap-2 shadow-md z-20">
+            <div className="flex items-center gap-4">
+              <h1 className="text-lg font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-500 whitespace-nowrap">
+                Yosakoi Simulator
+              </h1>
+              <div className="flex bg-gray-900 rounded p-1">
+                <button onClick={undo} disabled={historyIndex === 0} className="p-2 w-8 h-8 flex items-center justify-center hover:bg-gray-700 rounded disabled:opacity-30 disabled:cursor-not-allowed transition-colors"><i className="fas fa-undo text-[14px]"></i></button>
+                <button onClick={redo} disabled={historyIndex === history.length - 1} className="p-2 w-8 h-8 flex items-center justify-center hover:bg-gray-700 rounded disabled:opacity-30 disabled:cursor-not-allowed transition-colors"><i className="fas fa-redo text-[14px]"></i></button>
+              </div>
+            </div>
+
+            <div className="flex gap-2 text-sm">
+              <label className="flex items-center gap-1 bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded cursor-pointer transition-colors shadow-sm">
+                <i className="fas fa-upload text-[14px]"></i> JSON読込
+                <input type="file" accept=".json" onChange={importJSON} className="hidden" />
+              </label>
+              <button onClick={exportJSON} className="flex items-center gap-1 bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded transition-colors shadow-sm">
+                <i className="fas fa-download text-[14px]"></i> JSON保存
+              </button>
+              <button onClick={exportHTML} className="flex items-center gap-1 bg-blue-600 hover:bg-blue-500 px-3 py-1.5 rounded font-medium transition-colors shadow-sm">
+                <i className="fas fa-save text-[14px]"></i> HTML出力
+              </button>
+            </div>
+          </header>
+
+          {/* Main Content Area */}
+          <div className="flex flex-1 overflow-hidden flex-col md:flex-row relative">
+            
+            {/* Left Toolbar */}
+            <aside className="w-full md:w-16 bg-gray-800 border-r border-gray-700 flex md:flex-col items-center p-2 gap-3 overflow-x-auto md:overflow-y-auto z-10">
+              <button 
+                onClick={() => setIsMultiSelectMode(!isMultiSelectMode)}
+                className={`w-10 h-10 flex items-center justify-center rounded-xl transition-all shadow-sm flex-shrink-0 ${isMultiSelectMode ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+                title="複数選択モード"
+              >
+                <i className="fas fa-mouse-pointer text-[16px]"></i>
+              </button>
+              <div className="w-[1px] md:w-8 h-8 md:h-[1px] bg-gray-600"></div>
+              <button onClick={() => addElement('dancer')} className="w-10 h-10 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-green-400 rounded-xl transition-all shadow-sm flex-shrink-0" title="踊り子追加">
+                <i className="fas fa-circle text-[18px]"></i>
+              </button>
+              <button onClick={() => setShowPropModal(true)} className="w-10 h-10 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-orange-400 rounded-xl transition-all shadow-sm flex-shrink-0" title="大道具追加">
+                <i className="fas fa-square text-[18px]"></i>
+              </button>
+              
+              <div className="w-[1px] md:w-8 h-8 md:h-[1px] bg-gray-600"></div>
+              <button onClick={deleteSelected} disabled={selectedIds.length === 0} className="w-10 h-10 flex items-center justify-center bg-gray-700 hover:bg-red-600 text-red-400 hover:text-white rounded-xl disabled:opacity-30 disabled:cursor-not-allowed transition-all shadow-sm flex-shrink-0" title="選択削除">
+                <i className="fas fa-trash text-[16px]"></i>
+              </button>
+            </aside>
+
+            {/* Center Stage */}
+            <main className="flex-1 bg-gray-900 flex items-center justify-center p-4 overflow-hidden relative">
+              <div 
+                ref={stageRef}
+                id="stage-bg"
+                onPointerDown={handleStagePointerDown}
+                className="w-full max-w-5xl bg-white aspect-video relative rounded-lg shadow-2xl overflow-hidden ring-4 ring-gray-800"
+                style={{ backgroundImage: 'linear-gradient(rgba(0,0,0,0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(0,0,0,0.05) 1px, transparent 1px)', backgroundSize: '5% 5%' }}
+              >
+                {/* Elements */}
+                {project.elements.map(el => {
+                  const pos = interpolatedPositions[el.id];
+                  if (!pos) return null;
+                  const isSelected = selectedIds.includes(el.id);
+                  return (
+                    <div
+                      key={el.id}
+                      onPointerDown={(e) => handleElementPointerDown(e, el.id)}
+                      className={`absolute flex items-center justify-center font-bold select-none cursor-pointer text-white shadow-md transition-shadow
+                        ${el.type === 'dancer' ? 'rounded-full' : 'rounded-sm'}
+                        ${isSelected ? 'ring-4 ring-blue-500 ring-offset-1 z-50' : 'z-10 hover:ring-2 ring-gray-400'}`}
+                      style={{
+                        left: `${pos.x}%`, top: `${pos.y}%`,
+                        transform: 'translate(-50%, -50%)',
+                        backgroundColor: el.color,
+                        width: el.type === 'dancer' ? '3%' : `${el.width}%`,
+                        aspectRatio: el.type === 'dancer' ? '1' : 'auto',
+                        height: el.type === 'prop' ? `${el.height}%` : 'auto',
+                        fontSize: '1.2vmin',
+                        textShadow: '0 1px 2px rgba(0,0,0,0.8)'
+                      }}
+                    >
+                      {el.name}
+                    </div>
+                  );
+                })}
+              </div>
+              
+              {/* Nudge Controls */}
+              {selectedIds.length > 0 && (
+                <div className="absolute bottom-6 right-6 grid grid-cols-3 gap-1 bg-gray-800/80 p-2 rounded-xl backdrop-blur-sm shadow-xl border border-gray-700">
+                  <div />
+                  <button onClick={()=>nudge(0, -0.5)} className="w-8 h-8 flex items-center justify-center bg-gray-700 rounded hover:bg-gray-600 active:bg-gray-500"><i className="fas fa-chevron-up text-[14px]"></i></button>
+                  <div />
+                  <button onClick={()=>nudge(-0.5, 0)} className="w-8 h-8 flex items-center justify-center bg-gray-700 rounded hover:bg-gray-600 active:bg-gray-500"><i className="fas fa-chevron-left text-[14px]"></i></button>
+                  <button onClick={()=>nudge(0, 0.5)} className="w-8 h-8 flex items-center justify-center bg-gray-700 rounded hover:bg-gray-600 active:bg-gray-500"><i className="fas fa-chevron-down text-[14px]"></i></button>
+                  <button onClick={()=>nudge(0.5, 0)} className="w-8 h-8 flex items-center justify-center bg-gray-700 rounded hover:bg-gray-600 active:bg-gray-500"><i className="fas fa-chevron-right text-[14px]"></i></button>
+                </div>
+              )}
+            </main>
+
+            {/* Right Properties Panel */}
+            <aside className={`w-full md:w-72 bg-gray-800 border-l border-gray-700 p-4 overflow-y-auto ${selectedIds.length > 0 ? 'block' : 'hidden md:block'} z-10`}>
+              {selectedIds.length > 0 ? (
+                <div className="space-y-6">
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">プロパティ ({selectedIds.length} 選択)</h3>
+                    <div className="space-y-3">
+                      {selectedIds.length === 1 && (
+                        <div className="flex items-center gap-2">
+                          <i className="fas fa-font text-gray-400 text-[14px]"></i>
+                          <input 
+                            type="text" maxLength={3}
+                            value={project.elements.find(e=>e.id === selectedIds[0])?.name || ''}
+                            onChange={(e) => updateSelectedProperties('name', e.target.value)}
+                            className="bg-gray-900 border border-gray-700 rounded px-2 py-1 w-full text-sm focus:border-blue-500 outline-none"
+                            placeholder="表示名 (3文字)"
+                          />
+                        </div>
+                      )}
+                      <div>
+                        <label className="text-xs text-gray-400 mb-1 block">カラー</label>
+                        <div className="flex flex-wrap gap-1.5">
+                          {COLORS.map(c => (
+                             <button key={c} onClick={() => updateSelectedProperties('color', c)}
+                               className="w-6 h-6 rounded-full border border-gray-600 hover:scale-110 transition-transform"
+                               style={{backgroundColor: c}}
+                             />
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {selectedIds.length > 1 && (
+                    <div>
+                      <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">整列</h3>
+                      <div className="grid grid-cols-4 gap-2">
+                        <button onClick={()=>alignElements('left')} className="p-2 bg-gray-700 hover:bg-gray-600 rounded flex justify-center"><i className="fas fa-align-left text-[14px]"></i></button>
+                        <button onClick={()=>alignElements('center-h')} className="p-2 bg-gray-700 hover:bg-gray-600 rounded flex justify-center"><i className="fas fa-align-center text-[14px]"></i></button>
+                        <button onClick={()=>alignElements('right')} className="p-2 bg-gray-700 hover:bg-gray-600 rounded flex justify-center"><i className="fas fa-align-right text-[14px]"></i></button>
+                        <button onClick={()=>alignElements('space-h')} className="p-2 bg-gray-700 hover:bg-gray-600 rounded flex justify-center"><i className="fas fa-arrows-alt-h text-[14px]"></i></button>
+                        
+                        <button onClick={()=>alignElements('top')} className="p-2 bg-gray-700 hover:bg-gray-600 rounded flex justify-center rotate-90"><i className="fas fa-align-left text-[14px]"></i></button>
+                        <button onClick={()=>alignElements('center-v')} className="p-2 bg-gray-700 hover:bg-gray-600 rounded flex justify-center rotate-90"><i className="fas fa-align-center text-[14px]"></i></button>
+                        <button onClick={()=>alignElements('bottom')} className="p-2 bg-gray-700 hover:bg-gray-600 rounded flex justify-center rotate-90"><i className="fas fa-align-right text-[14px]"></i></button>
+                        <button onClick={()=>alignElements('space-v')} className="p-2 bg-gray-700 hover:bg-gray-600 rounded flex justify-center rotate-90"><i className="fas fa-arrows-alt-v text-[14px]"></i></button>
+                      </div>
+                    </div>
+                  )}
+
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">移動経路 (前シーンから)</h3>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <button onClick={()=>updateSelectedPaths('line')} className="p-2 bg-gray-700 hover:bg-blue-600 rounded">直線</button>
+                      <button onClick={()=>updateSelectedPaths('curve')} className="p-2 bg-gray-700 hover:bg-blue-600 rounded">カーブ</button>
+                      <button onClick={()=>updateSelectedPaths('right-h-v')} className="p-2 bg-gray-700 hover:bg-blue-600 rounded">直角(横→縦)</button>
+                      <button onClick={()=>updateSelectedPaths('right-v-h')} className="p-2 bg-gray-700 hover:bg-blue-600 rounded">直角(縦→横)</button>
+                    </div>
+                  </div>
+
+                </div>
+              ) : (
+                <div className="h-full flex flex-col items-center justify-center text-gray-500 text-sm">
+                  <i className="fas fa-mouse-pointer text-[32px] mb-2 opacity-50"></i>
+                  <p>要素を選択してください</p>
+                </div>
+              )}
+            </aside>
+
+          </div>
+
+          {/* Footer Controls */}
+          <footer className="bg-gray-800 border-t border-gray-700 p-4 h-48 flex flex-col z-20">
+            
+            <div className="flex items-center gap-4 mb-4">
+              <button 
+                onClick={() => setIsPlaying(!isPlaying)}
+                className="w-12 h-12 rounded-full bg-blue-600 hover:bg-blue-500 flex items-center justify-center shadow-lg shadow-blue-900/50 transition-transform active:scale-95 text-white"
+              >
+                {isPlaying ? <i className="fas fa-pause text-[20px]"></i> : <i className="fas fa-play text-[20px] ml-1"></i>}
+              </button>
+              
+              <div className="text-xl font-mono tabular-nums w-20 text-center text-blue-400 font-bold bg-gray-900 py-1 rounded">
+                {currentTime.toFixed(1)}s
+              </div>
+
+              <label className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded cursor-pointer text-sm font-medium transition-colors">
+                {project.audioBase64 ? '🎵 音源変更' : '🎵 MP3読込'}
+                <input type="file" accept="audio/mp3,audio/mpeg" onChange={handleAudioUpload} className="hidden" />
+              </label>
+              
+              {project.audioBase64 && (
+                 <audio ref={audioRef} src={project.audioBase64} onLoadedMetadata={onAudioLoaded} />
+              )}
+
+              <div className="ml-auto flex gap-2">
+                <button onClick={addScene} className="flex items-center gap-1 bg-green-600 hover:bg-green-500 px-3 py-2 rounded text-sm font-bold shadow-sm transition-colors">
+                  <i className="fas fa-plus text-[14px]"></i> シーン追加
+                </button>
+              </div>
+            </div>
+
+            {/* Timeline Track */}
+            <div className="relative flex-1 bg-gray-900 rounded-lg border border-gray-700 mt-2 px-4 cursor-pointer flex items-center shadow-inner"
+                 onPointerDown={(e) => {
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const p = (e.clientX - rect.left) / rect.width;
+                    const newT = Math.max(0, Math.min(1, p)) * maxTimelineTime;
+                    setCurrentTime(newT);
+                    if (audioRef.current) audioRef.current.currentTime = newT;
+                 }}>
+              
+              <div className="absolute left-0 top-0 bottom-0 bg-blue-900/30 rounded-l-lg pointer-events-none" style={{ width: `${(currentTime / maxTimelineTime) * 100}%` }}></div>
+              
+              <div className="absolute top-0 bottom-0 w-[2px] bg-red-500 pointer-events-none z-10" style={{ left: `${(currentTime / maxTimelineTime) * 100}%` }}>
+                <div className="w-3 h-3 bg-red-500 rotate-45 absolute -top-1.5 -left-1.5 shadow-sm"></div>
+              </div>
+
+              {project.scenes.map((scene, i) => {
+                const leftPct = (scene.time / maxTimelineTime) * 100;
+                const isActive = i === currentSceneIndex;
+                return (
+                  <div key={scene.id} className="absolute top-0 bottom-0 flex flex-col items-center z-20 pointer-events-none" style={{ left: `${leftPct}%` }}>
+                    <div className={`w-[2px] h-full ${isActive ? 'bg-yellow-400' : 'bg-gray-500'}`}></div>
+                    <div 
+                      className={`absolute -top-6 px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap shadow-sm pointer-events-auto
+                        ${isActive ? 'bg-yellow-400 text-yellow-900' : 'bg-gray-600 text-gray-200'}`}
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        setCurrentTime(scene.time);
+                        if (audioRef.current) audioRef.current.currentTime = scene.time;
+                      }}
+                    >
+                      {scene.name}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Scene List & Editor */}
+            <div className="flex gap-2 mt-4 overflow-x-auto pb-2 scrollbar-hide">
+              {project.scenes.map((scene, i) => (
+                <div key={scene.id} className={`flex-shrink-0 flex flex-col bg-gray-800 border ${i === currentSceneIndex ? 'border-yellow-500' : 'border-gray-700'} rounded p-2 text-xs w-32 shadow-sm`}>
+                   <div className="flex justify-between items-center mb-1">
+                     <span className="font-bold text-gray-300">{scene.name}</span>
+                     {i > 0 && <button onClick={() => deleteScene(i)} className="text-gray-500 hover:text-red-400"><i className="fas fa-trash text-[10px]"></i></button>}
+                   </div>
+                   <div className="flex items-center gap-1">
+                     <input 
+                       type="number" step="0.1" min="0" max={maxTimelineTime}
+                       value={scene.time} 
+                       onChange={(e) => updateSceneTime(i, e.target.value)}
+                       disabled={i === 0}
+                       className="w-full bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-right font-mono outline-none focus:border-blue-500 disabled:opacity-50"
+                     />
+                     <span className="text-gray-500">s</span>
+                   </div>
+                </div>
+              ))}
+            </div>
+          </footer>
+
+          {/* Prop Modal */}
+          {showPropModal && (
+            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+              <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 w-full max-w-sm shadow-2xl">
+                <h2 className="text-lg font-bold mb-4 text-white">大道具の追加</h2>
+                
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-1">幅 ({newPropSize.w}%)</label>
+                    <input type="range" min="1" max="100" value={newPropSize.w} onChange={e => setNewPropSize({...newPropSize, w: parseInt(e.target.value)})} className="w-full accent-orange-500" />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-1">高さ ({newPropSize.h}%)</label>
+                    <input type="range" min="1" max="100" value={newPropSize.h} onChange={e => setNewPropSize({...newPropSize, h: parseInt(e.target.value)})} className="w-full accent-orange-500" />
+                  </div>
+                  
+                  <div className="mt-4 bg-gray-900 h-32 rounded-lg border border-gray-700 flex items-center justify-center relative overflow-hidden">
+                     <div className="bg-orange-500 rounded-sm" style={{ width: `${newPropSize.w}%`, height: `${newPropSize.h}%` }}></div>
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-3 mt-6">
+                  <button onClick={() => setShowPropModal(false)} className="px-4 py-2 rounded text-sm text-gray-400 hover:bg-gray-700">キャンセル</button>
+                  <button onClick={() => { addElement('prop', newPropSize.w, newPropSize.h); setShowPropModal(false); }} className="px-4 py-2 rounded text-sm bg-orange-600 hover:bg-orange-500 text-white font-bold">追加する</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
