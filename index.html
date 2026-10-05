@@ -46,28 +46,36 @@
     if (targetScene.id === prevScene.id)
       return { x: targetData.x, y: targetData.y };
     const moveDuration = targetData.duration !== void 0 ? targetData.duration : 2;
-    const moveStartTime = targetScene.time - moveDuration;
+    const moveStartTime = Math.max(prevScene.time, targetScene.time - moveDuration);
     if (time <= moveStartTime)
       return { x: prevData.x, y: prevData.y };
     if (time >= targetScene.time)
       return { x: targetData.x, y: targetData.y };
-    const progress = (time - moveStartTime) / moveDuration;
-    const p0 = prevData;
-    const p1 = targetData;
-    if (p1.pathType === "curve" && p1.cpX != null) {
-      const x = Math.pow(1 - progress, 2) * p0.x + 2 * (1 - progress) * progress * p1.cpX + Math.pow(progress, 2) * p1.x;
-      const y = Math.pow(1 - progress, 2) * p0.y + 2 * (1 - progress) * progress * p1.cpY + Math.pow(progress, 2) * p1.y;
+    const progress = (time - moveStartTime) / (targetScene.time - moveStartTime);
+    const p0 = { x: prevData.x, y: prevData.y };
+    const p1 = { x: targetData.x, y: targetData.y };
+    const pathType = targetData.pathType || "linear";
+    if (pathType === "curve" && targetData.cpX != null && targetData.cpY != null) {
+      const inv = 1 - progress;
+      const x = inv * inv * p0.x + 2 * inv * progress * targetData.cpX + progress * progress * p1.x;
+      const y = inv * inv * p0.y + 2 * inv * progress * targetData.cpY + progress * progress * p1.y;
       return { x, y };
-    } else if (p1.pathType === "rightAngleX") {
-      if (progress < 0.5)
-        return { x: p0.x + (p1.x - p0.x) * (progress * 2), y: p0.y };
-      else
-        return { x: p1.x, y: p0.y + (p1.y - p0.y) * ((progress - 0.5) * 2) };
-    } else if (p1.pathType === "rightAngleY") {
-      if (progress < 0.5)
-        return { x: p0.x, y: p0.y + (p1.y - p0.y) * (progress * 2) };
-      else
-        return { x: p0.x + (p1.x - p0.x) * ((progress - 0.5) * 2), y: p1.y };
+    } else if (pathType === "rightAngleX") {
+      if (progress < 0.5) {
+        const p = progress * 2;
+        return { x: p0.x + (p1.x - p0.x) * p, y: p0.y };
+      } else {
+        const p = (progress - 0.5) * 2;
+        return { x: p1.x, y: p0.y + (p1.y - p0.y) * p };
+      }
+    } else if (pathType === "rightAngleY") {
+      if (progress < 0.5) {
+        const p = progress * 2;
+        return { x: p0.x, y: p0.y + (p1.y - p0.y) * p };
+      } else {
+        const p = (progress - 0.5) * 2;
+        return { x: p0.x + (p1.x - p0.x) * p, y: p1.y };
+      }
     } else {
       const x = p0.x + (p1.x - p0.x) * progress;
       const y = p0.y + (p1.y - p0.y) * progress;
